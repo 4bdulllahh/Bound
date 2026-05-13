@@ -41,9 +41,13 @@ class HokmGame:
         self.current_bid = 5
         self.bid_winner = None
         self.hokm_suit = None
-        self.turn_index = 0 # 0: User, 1: Bot Left, 2: Partner, 3: Bot Right
-        self.table_cards = [] # List of (player_index, Card)
-        self.is_8_trick_special = False
+        self.turn_index = 0 
+        self.table_cards = [] 
+        self.trick_count = 1
+        self.team_tricks = [0, 0] # [Team A (0&2), Team B (1&3)]
+        self.match_score = [0, 0]
+        self.black_joker_played = False
+        self.red_joker_played = False
 
     def create_deck(self):
         deck = []
@@ -59,6 +63,8 @@ class HokmGame:
         self.players[p_idx].sort(key=lambda x: x.get_sort_value())
 
     def deal_cards(self):
+        self.deck = self.create_deck()
+        random.shuffle(self.deck)
         for _ in range(3):
             for i in range(4):
                 for _ in range(3): self.players[i].append(self.deck.pop())
@@ -74,14 +80,11 @@ class HokmGame:
 
     def bot_bidding(self):
         for i in range(1, 4):
-            power_cards = [c for c in self.players[i] if c.rank >= 13 or c.is_joker]
-            if len(power_cards) > 3 and self.current_bid < 8:
+            power = len([c for c in self.players[i] if c.rank >= 13 or c.is_joker])
+            if power > 3 and self.current_bid < 8:
                 self.current_bid += 1
                 self.bid_winner = i
-        
         if self.bid_winner is None: self.bid_winner = 0
-        self.is_8_trick_special = self.current_bid >= 8
-
         if self.bid_winner == 0:
             self.game_phase = "CHOOSE_HOKM"
             self.create_hokm_ui()
@@ -97,26 +100,65 @@ class HokmGame:
 
     def start_play_phase(self):
         self.game_phase = "PLAY"
-        # Person to the right of bidder starts
-        self.turn_index = (self.bid_winner + 1) % 4
-        self.status_msg = f"Hokm: {self.hokm_suit}. Player {self.turn_index}'s turn."
+        # Anti-clockwise: Right of bidder starts
+        self.turn_index = (self.bid_winner + 3) % 4 
+        self.status_msg = f"Hokm: {self.hokm_suit}. Start!"
+
+    def determine_trick_winner(self):
+        lead_suit = self.table_cards[0][1].suit
+        winner_idx = 0
+        best_card = self.table_cards[0][1]
+
+        for i in range(1, 4):
+            p_idx, card = self.table_cards[i]
+            # Red Joker Beats All
+            if card.joker_type == "Red":
+                best_card, winner_idx = card, p_idx
+                break 
+            # Black Joker Beats Trump/Lead
+            elif card.joker_type == "Black" and best_card.joker_type != "Red":
+                best_card, winner_idx = card, p_idx
+            # Trump Beats Lead
+            elif card.suit == self.hokm_suit and best_card.suit != self.hokm_suit and not best_card.is_joker:
+                best_card, winner_idx = card, p_idx
+            # Higher of same suit
+            elif card.suit == best_card.suit and card.rank > best_card.rank and not best_card.is_joker:
+                best_card, winner_idx = card, p_idx
+        
+        # Determine team and award trick
+        winning_team = 0 if winner_idx in [0, 2] else 1
+        self.team_tricks[winning_team] += 1
+        self.turn_index = winner_idx
+        self.trick_count += 1
+        self.table_cards = []
 
     def play_card(self, player_idx, card_idx):
         card = self.players[player_idx].pop(card_idx)
+        
+        # Check Black Joker Round Lock
+        if self.trick_count <= 3 and card.joker_type == "Black":
+            self.black_joker_played = True
+        
+        # Rule Check: Forced start at Trick 3?
+        if self.trick_count == 3 and len(self.table_cards) == 0:
+            has_black = any(c.joker_type == "Black" for c in self.players[player_idx])
+            if has_black and card.joker_type != "Black":
+                self.penalty_end(player_idx)
+                return
+
         self.table_cards.append((player_idx, card))
-        self.turn_index = (self.turn_index + 1) % 4
+        # ANTI-CLOCKWISE: 0 -> 3 -> 2 -> 1
+        self.turn_index = (self.turn_index + 3) % 4 
         
         if len(self.table_cards) == 4:
-            self.status_msg = "Trick Complete! (Logic for winner coming next...)"
-            # For now, just clear the table after a delay or click
-        else:
-            self.status_msg = f"Turn: Player {self.turn_index}"
+            pygame.time.delay(1000)
+            self.determine_trick_winner()
 
-    def bot_play(self):
-        if self.turn_index != 0 and self.game_phase == "PLAY":
-            # Simple AI: Play the first valid card
-            # In a real game, we would check for lead suit, but for now:
-            self.play_card(self.turn_index, 0)
+    def penalty_end(self, culprit_idx):
+        victim_team = 0 if culprit_idx in [1, 3] else 1
+        self.match_score[victim_team] += 15
+        self.game_phase = "SHUFFLE"
+        self.status_msg = "JOKER PENALTY! +15 for opponents. SPACE to Reset."
 
 def main():
     pygame.init()
@@ -128,53 +170,47 @@ def main():
     while True:
         screen.fill(GREEN)
         m_pos = pygame.mouse.get_pos()
-        
         for event in pygame.event.get():
             if event.type == pygame.QUIT: pygame.quit(); sys.exit()
             if event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE and game.game_phase == "SHUFFLE":
-                game.game_phase = "CUT"
+                game.deal_cards()
             if event.type == pygame.MOUSEBUTTONDOWN:
-                if game.game_phase == "CUT":
-                    random.shuffle(game.deck); game.deal_cards()
-                elif game.game_phase == "BID":
+                if game.game_phase == "BID":
                     for rect, val in game.bid_buttons:
                         if rect.collidepoint(m_pos):
-                            if val != "Skip": 
-                                game.current_bid = int(val); game.bid_winner = 0
+                            if val != "Skip": game.current_bid = int(val); game.bid_winner = 0
                             game.bot_bidding()
                 elif game.game_phase == "CHOOSE_HOKM":
                     for rect, suit in game.hokm_buttons:
-                        if rect.collidepoint(m_pos):
-                            game.hokm_suit = suit; game.start_play_phase()
+                        if rect.collidepoint(m_pos): game.hokm_suit = suit; game.start_play_phase()
                 elif game.game_phase == "PLAY" and game.turn_index == 0:
                     for i, card in enumerate(game.players[0]):
-                        if card.rect.collidepoint(m_pos):
-                            game.play_card(0, i); break
+                        if card.rect.collidepoint(m_pos): game.play_card(0, i); break
 
-        # AI Turn trigger
-        if game.game_phase == "PLAY" and game.turn_index != 0:
-            pygame.time.delay(500) # Wait a bit so it's not instant
-            game.bot_play()
+        if game.game_phase == "PLAY" and game.turn_index != 0 and len(game.table_cards) < 4:
+            pygame.time.delay(400); game.play_card(game.turn_index, 0)
 
-        # Draw Table
-        pygame.draw.circle(screen, BLACK, (SCREEN_WIDTH//2, SCREEN_HEIGHT//2), 150, 2)
-        for i, (p_idx, card) in enumerate(game.table_cards):
-            # Positioning cards on table based on who played them
-            pos_map = {0: (465, 400), 1: (350, 280), 2: (465, 180), 3: (580, 280)}
+        # Draw Scoreboard (Top Right)
+        score_txt = [f"Match Score: A:{game.match_score[0]} B:{game.match_score[1]}",
+                     f"Round Tricks: A:{game.team_tricks[0]} B:{game.team_tricks[1]}",
+                     f"Current Trick: {game.trick_count}/9"]
+        for i, line in enumerate(score_txt):
+            screen.blit(font.render(line, True, GOLD), (700, 20 + (i*25)))
+
+        # Draw Table (Anti-clockwise layout)
+        pos_map = {0: (465, 400), 3: (580, 280), 2: (465, 180), 1: (350, 280)}
+        for p_idx, card in game.table_cards:
             x, y = pos_map[p_idx]
             pygame.draw.rect(screen, WHITE, (x, y, CARD_WIDTH, CARD_HEIGHT), border_radius=5)
-            pygame.draw.rect(screen, BLACK, (x, y, CARD_WIDTH, CARD_HEIGHT), 2, border_radius=5)
             screen.blit(font.render(card.get_display_rank() + SUIT_LETTERS.get(card.suit, ""), True, BLACK), (x+10, y+35))
 
-        # Draw Player Hand
+        # User Hand
         for i, card in enumerate(game.players[0]):
             x, y = 100 + (i * 80), 550
             card.rect = pygame.Rect(x, y, CARD_WIDTH, CARD_HEIGHT)
             pygame.draw.rect(screen, WHITE, card.rect, border_radius=5)
-            pygame.draw.rect(screen, BLACK, card.rect, 2 if not card.rect.collidepoint(m_pos) else 4, border_radius=5)
             if not card.is_joker:
                 pygame.draw.rect(screen, SUIT_COLORS[card.suit], (x+5, y+5, CARD_WIDTH-10, 15))
-                screen.blit(font.render(SUIT_LETTERS[card.suit], True, WHITE), (x+25, y+3))
             screen.blit(font.render(card.get_display_rank(), True, BLACK), (x+20, y+45))
 
         screen.blit(font.render(game.status_msg, True, WHITE), (30, 30))
