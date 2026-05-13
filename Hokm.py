@@ -86,7 +86,7 @@ class HokmGame:
         else:
             self.current_bid = int(bid_val)
             self.bid_winner = self.bidding_turn
-            self.skip_count = 0 # Reset skip count on new high bid
+            self.skip_count = 0 
             self.status_msg = f"Player {self.bidding_turn} Bids {bid_val}."
         
         self.bidding_turn = (self.bidding_turn + 1) % 4
@@ -121,7 +121,6 @@ class HokmGame:
 
         for i in range(1, 4):
             p_idx, card = self.table_cards[i]
-            # Red Joker sequence rule
             if card.joker_type == "Red":
                 best_card, winner_idx = card, p_idx
                 break
@@ -138,7 +137,6 @@ class HokmGame:
         self.turn_index = winner_idx
         self.table_cards = []
         
-        # Black Joker Round 3 Check
         if self.trick_count == 3 and not self.black_joker_played:
             for p_idx in range(4):
                 if any(c.joker_type == "Black" for c in self.players[p_idx]):
@@ -153,7 +151,7 @@ class HokmGame:
     def play_card(self, player_idx, card_idx):
         card = self.players[player_idx][card_idx]
         
-        # Red Joker sequence check (Must have Black played or have both)
+        # Red Joker sequence check
         if card.joker_type == "Red" and not self.black_joker_played:
             has_black = any(c.joker_type == "Black" for c in self.players[player_idx])
             if not has_black:
@@ -165,11 +163,43 @@ class HokmGame:
         self.table_cards.append((player_idx, card))
         self.turn_index = (self.turn_index + 3) % 4 
 
+    def hard_bot_play(self, p_idx):
+        hand = self.players[p_idx]
+        lead_card = self.table_cards[0][1] if self.table_cards else None
+        
+        # 1. Handle Black Joker Penalty (MUST play by Round 3)
+        if self.trick_count <= 3:
+            for i, c in enumerate(hand):
+                if c.joker_type == "Black":
+                    # If I am starting Round 3, I CANNOT start with it (Penalty check handled in play_card)
+                    if self.trick_count == 3 and not lead_card:
+                        continue
+                    return i
+
+        # 2. Forced Hokm Lead (8-Trick Rule)
+        if not lead_card and self.current_bid >= 8 and self.trick_count == 1:
+            for i, c in enumerate(hand):
+                if c.suit == self.hokm_suit: return i
+
+        # 3. Follow Suit Logic
+        if lead_card and not lead_card.is_joker:
+            suit_cards = [i for i, c in enumerate(hand) if c.suit == lead_card.suit]
+            if suit_cards:
+                # Play the highest card to win, or lowest to lose
+                return suit_cards[0] 
+
+        # 4. Use Joker or Trump if void of lead suit
+        if lead_card:
+            for i, c in enumerate(hand):
+                if c.is_joker or c.suit == self.hokm_suit: return i
+
+        return 0 # Default
+
     def penalty_end(self, culprit_idx):
         victim = 1 if culprit_idx in [0, 2] else 0
         self.match_score[victim] += 15
         self.game_phase = "SHUFFLE"
-        self.status_msg = "JOKER PENALTY! +15. Press SPACE."
+        self.status_msg = f"JOKER PENALTY (P{culprit_idx})! +15."
 
 def main():
     pygame.init()
@@ -196,40 +226,28 @@ def main():
                     for i, card in enumerate(game.players[0]):
                         if card.rect.collidepoint(m_pos): game.play_card(0, i); break
 
-        # AI Bidding Logic (Slower)
         if game.game_phase == "BID" and game.bidding_turn != 0:
             pygame.time.delay(800)
             power = len([c for c in game.players[game.bidding_turn] if c.rank >= 13 or c.is_joker])
-            if power > 3 and game.current_bid < 8:
-                game.handle_bidding(str(game.current_bid + 1))
-            else:
-                game.handle_bidding("Skip")
+            if power > 3 and game.current_bid < 8: game.handle_bidding(str(game.current_bid + 1))
+            else: game.handle_bidding("Skip")
 
-        # Play Logic
         if game.game_phase == "PLAY":
             if len(game.table_cards) == 4:
                 pygame.time.delay(1200)
                 game.determine_trick_winner()
             elif game.turn_index != 0:
                 pygame.time.delay(600)
-                game.play_card(game.turn_index, 0)
+                idx = game.hard_bot_play(game.turn_index)
+                game.play_card(game.turn_index, idx)
 
-        # Draw Info Box (Top Left)
-        if game.game_phase in ["PLAY", "SHUFFLE"]:
-            info_box = [f"Winner: Team {'A' if game.bid_winner in [0,2] else 'B'}",
-                        f"Target: {game.current_bid} tricks",
-                        f"Hokm: {game.hokm_suit}"]
-            for i, text in enumerate(info_box):
-                screen.blit(font.render(text, True, WHITE), (20, 80 + (i*25)))
+        # Rendering
+        info_box = [f"Bidding: Team {'A' if game.bid_winner in [0,2] else 'B'}", f"Goal: {game.current_bid}", f"Hokm: {game.hokm_suit}"]
+        for i, text in enumerate(info_box): screen.blit(font.render(text, True, WHITE), (20, 80 + (i*25)))
+        
+        score_txt = [f"Match: A:{game.match_score[0]} B:{game.match_score[1]}", f"Tricks: A:{game.team_tricks[0]} B:{game.team_tricks[1]}", f"Trick: {game.trick_count}/9"]
+        for i, line in enumerate(score_txt): screen.blit(font.render(line, True, GOLD), (750, 20 + (i*25)))
 
-        # Scoreboard
-        score_txt = [f"Match: A:{game.match_score[0]} B:{game.match_score[1]}",
-                     f"Tricks: A:{game.team_tricks[0]} B:{game.team_tricks[1]}",
-                     f"Trick: {game.trick_count}/9"]
-        for i, line in enumerate(score_txt):
-            screen.blit(font.render(line, True, GOLD), (750, 20 + (i*25)))
-
-        # Cards and UI
         pos_map = {0: (465, 400), 3: (580, 280), 2: (465, 180), 1: (350, 280)}
         for p_idx, card in game.table_cards:
             x, y = pos_map[p_idx]
