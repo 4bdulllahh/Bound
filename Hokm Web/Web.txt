@@ -1,2 +1,7 @@
 Original file has
-client> 
+client> src > main.jsx, styles.css
+client> index.html, package.json
+server> index.js 
+package.json
+
+
