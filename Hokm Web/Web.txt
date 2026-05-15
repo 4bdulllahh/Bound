@@ -1,4 +1,5 @@
-Original file has
+Original file has the fdollowing files: 
+
 client> src > main.jsx, styles.css
 client> index.html, package.json
 server> index.js 
