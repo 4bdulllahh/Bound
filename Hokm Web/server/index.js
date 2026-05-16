@@ -10,9 +10,7 @@ const PORT = process.env.PORT || 3001;
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, {
-  cors: { origin: '*' }
-});
+const io = new Server(server, { cors: { origin: '*' } });
 
 const rooms = new Map();
 const suits = ['spades', 'hearts', 'clubs', 'diamonds'];
@@ -29,9 +27,10 @@ function code() {
   return c;
 }
 
-function rightOf(i) { return (i + 1) % 4; }
-function teammateOf(i) { return (i + 2) % 4; }
+function rightOf(i) { return (i + 1) % 4; } // anti-clockwise direction in this app
 function teamOf(i) { return i % 2; }
+function otherTeamOfPlayer(i) { return 1 - teamOf(i); }
+function isJoker(card) { return card.type === 'blackJoker' || card.type === 'redJoker'; }
 
 function createDeck() {
   const deck = [];
@@ -56,17 +55,34 @@ function shuffle(deck) {
 }
 
 function roomPublic(room, socketId = null) {
-  const me = room.players.find(p => p.id === socketId);
+  const meSeat = room.players.findIndex(p => p.id === socketId);
+  const spectator = room.spectators?.find(s => s.id === socketId) || null;
+  const meIsHost = socketId === room.hostId;
+
   const players = room.players.map((p, idx) => ({
-    id: p.id, name: p.name, seat: idx, connected: p.connected, cardsCount: p.hand.length, team: teamOf(idx)
+    id: meIsHost ? p.id : null,
+    name: p.name,
+    seat: idx,
+    connected: p.connected,
+    team: teamOf(idx)
   }));
-  const hand = me ? me.hand : [];
+
+  const spectators = (room.spectators || []).map(s => ({
+    id: meIsHost ? s.id : null,
+    name: s.name,
+    connected: s.connected
+  }));
+
   return {
     code: room.code,
-    hostId: room.hostId,
+    hostId: meIsHost ? room.hostId : null,
+    meIsHost,
+    meRole: meSeat >= 0 ? 'player' : spectator ? 'spectator' : 'unknown',
     players,
-    meSeat: me ? room.players.indexOf(me) : null,
-    hand,
+    spectators,
+    meSeat: meSeat >= 0 ? meSeat : null,
+    // Spectator security: only an active player receives their own hidden hand.
+    hand: meSeat >= 0 ? room.players[meSeat].hand : [],
     phase: room.phase,
     message: room.message,
     scores: room.scores,
@@ -84,12 +100,14 @@ function roomPublic(room, socketId = null) {
     trick: room.trick,
     trickNumber: room.trickNumber,
     tricksWon: room.tricksWon,
-    blackJokerUsed: room.blackJokerUsed,
     bound: room.bound,
     gameWinnerTeam: room.gameWinnerTeam,
     gameLoserTeam: room.gameLoserTeam,
     roundBid: room.roundBid,
-    history: room.history.slice(-12)
+    nextDealer: room.nextDealer,
+    roundNumber: room.roundNumber,
+    chat: room.chat || [],
+    noCardHistory: true
   };
 }
 
@@ -97,21 +115,68 @@ function emitRoom(room) {
   for (const p of room.players) {
     if (p.id) io.to(p.id).emit('state', roomPublic(room, p.id));
   }
+  for (const spectator of room.spectators || []) {
+    if (spectator.id) io.to(spectator.id).emit('state', roomPublic(room, spectator.id));
+  }
 }
 
-function addHistory(room, text) {
-  room.history.push(text);
+function clearRoundStateToLobby(room, message) {
+  room.players.forEach(p => p.hand = []);
+  room.phase = 'lobby';
+  room.dealer = null;
+  room.cutter = null;
+  room.bidStarter = null;
+  room.currentBid = null;
+  room.currentBidder = null;
+  room.biddingTurn = null;
+  room.skipped = [false, false, false, false];
+  room.bidWinner = null;
+  room.trump = null;
+  room.leader = null;
+  room.turn = null;
+  room.trick = [];
+  room.trickNumber = 0;
+  room.tricksWon = [0, 0];
+  room.blackJokerUsed = false;
+  room.bound = false;
+  room.roundBid = null;
+  room.nextDealer = null;
+  room.deck = [];
+  room.message = message;
 }
 
 function makeRoom(hostId, name) {
   const room = {
-    code: code(), hostId,
+    code: code(),
+    hostId,
     players: [{ id: hostId, name, connected: true, hand: [] }],
-    phase: 'lobby', message: 'Waiting for 4 players.', scores: [0, 0],
-    dealer: null, cutter: null, bidStarter: null, currentBid: null, currentBidder: null,
-    biddingTurn: null, skipped: [false, false, false, false], bidWinner: null, trump: null,
-    leader: null, turn: null, trick: [], trickNumber: 0, tricksWon: [0, 0], blackJokerUsed: false,
-    bound: false, roundBid: null, gameWinnerTeam: null, gameLoserTeam: null, history: [], roundNumber: 0
+    spectators: [],
+    phase: 'lobby',
+    message: 'Waiting for 4 players.',
+    scores: [0, 0],
+    dealer: null,
+    cutter: null,
+    bidStarter: null,
+    currentBid: null,
+    currentBidder: null,
+    biddingTurn: null,
+    skipped: [false, false, false, false],
+    bidWinner: null,
+    trump: null,
+    leader: null,
+    turn: null,
+    trick: [],
+    trickNumber: 0,
+    tricksWon: [0, 0],
+    blackJokerUsed: false,
+    bound: false,
+    roundBid: null,
+    gameWinnerTeam: null,
+    gameLoserTeam: null,
+    roundNumber: 0,
+    nextDealer: null,
+    deck: [],
+    chat: []
   };
   rooms.set(room.code, room);
   return room;
@@ -123,7 +188,7 @@ function resetForNewRound(room, dealer = null) {
   room.phase = 'cut';
   room.dealer = dealer ?? Math.floor(Math.random() * 4);
   room.cutter = rightOf(room.dealer);
-  room.bidStarter = room.cutter;
+  room.bidStarter = rightOf(room.dealer);
   room.currentBid = null;
   room.currentBidder = null;
   room.biddingTurn = room.bidStarter;
@@ -140,19 +205,26 @@ function resetForNewRound(room, dealer = null) {
   room.roundBid = null;
   room.gameWinnerTeam = null;
   room.gameLoserTeam = null;
+  room.nextDealer = null;
   room.deck = shuffle(createDeck());
   room.message = `${room.players[room.dealer].name} shuffled. ${room.players[room.cutter].name} must cut the deck.`;
-  addHistory(room, `Round ${room.roundNumber}: ${room.players[room.dealer].name} shuffles; ${room.players[room.cutter].name} cuts.`);
 }
 
 function deal(room) {
-  const deck = room.deck;
-  for (let i = 0; i < 36; i++) room.players[i % 4].hand.push(deck[i]);
+  // 3-3-3 deal pattern, moving anti-clockwise from the player right of the dealer.
+  let deckIndex = 0;
+  for (let batch = 0; batch < 3; batch++) {
+    for (let offset = 1; offset <= 4; offset++) {
+      const playerIdx = (room.dealer + offset) % 4;
+      room.players[playerIdx].hand.push(...room.deck.slice(deckIndex, deckIndex + 3));
+      deckIndex += 3;
+    }
+  }
   room.phase = 'bidding';
-  room.message = `${room.players[room.bidStarter].name} starts bidding.`;
+  room.message = `${room.players[room.bidStarter].name} starts bidding. Bid 6 or higher, or skip.`;
 }
 
-function nextActiveBidder(room, from) {
+function nextUnskippedBidder(room, from) {
   for (let step = 1; step <= 4; step++) {
     const idx = (from + step) % 4;
     if (!room.skipped[idx]) return idx;
@@ -161,26 +233,35 @@ function nextActiveBidder(room, from) {
 }
 
 function activeBidders(room) {
-  return [0,1,2,3].filter(i => !room.skipped[i]);
+  return [0, 1, 2, 3].filter(i => !room.skipped[i]);
+}
+
+function skipCount(room) {
+  return room.skipped.filter(Boolean).length;
+}
+
+function getMinimumBid(room, playerIdx) {
+  if (room.currentBid !== null && room.currentBid !== 'BOUND') return room.currentBid + 1;
+  // The 5-bid is only available when the previous 3 players skipped and this player is the last unskipped player.
+  if (room.currentBid === null && skipCount(room) === 3 && !room.skipped[playerIdx]) return 5;
+  return 6;
 }
 
 function finalizeBid(room, winner) {
   room.bidWinner = winner;
   room.roundBid = room.currentBid;
-  room.phase = room.currentBid === 'BOUND' ? 'playing' : 'chooseTrump';
+
   if (room.currentBid === 'BOUND') {
     room.bound = true;
     room.roundBid = 'BOUND';
     room.trump = null;
-    room.leader = rightOf(winner);
-    room.turn = room.leader;
-    room.trickNumber = 1;
-    room.message = `${room.players[winner].name} called Bound. ${room.players[room.leader].name} starts the first trick.`;
-    addHistory(room, `${room.players[winner].name} wins bidding with Bound.`);
-  } else {
-    room.message = `${room.players[winner].name} won the bid with ${room.currentBid}. Choose the power suit.`;
-    addHistory(room, `${room.players[winner].name} wins bidding with ${room.currentBid}.`);
+    room.phase = 'chooseTrump';
+    room.message = `${room.players[winner].name} won the auction with Bound. Choose the Trump Suit before play starts.`;
+    return;
   }
+
+  room.phase = 'chooseTrump';
+  room.message = `${room.players[winner].name} won the bid with ${room.currentBid}. Choose the Trump Suit.`;
 }
 
 function allSkippedNoBid(room) {
@@ -189,99 +270,37 @@ function allSkippedNoBid(room) {
 
 function checkBiddingEnd(room) {
   if (allSkippedNoBid(room)) {
-    addHistory(room, 'Everyone skipped. Cards are reshuffled.');
     resetForNewRound(room, room.dealer);
+    room.message = 'Everyone skipped. The cards were reshuffled and redealt. New bidding starts after cutting.';
     return;
   }
+
   const active = activeBidders(room);
   if (room.currentBidder !== null && active.length === 1 && active[0] === room.currentBidder) {
     finalizeBid(room, room.currentBidder);
   }
 }
 
+function cardPower(card, trump, leadSuit) {
+  if (card.type === 'redJoker') return 500;
+  if (card.type === 'blackJoker') return 400;
+  if (card.suit === trump) return 300 + rankValue[card.rank];
+  if (card.suit === leadSuit) return 100 + rankValue[card.rank];
+  return rankValue[card.rank];
+}
+
 function cardBeats(a, b, trump, leadSuit) {
   if (!b) return true;
-  const power = c => c.type === 'redJoker' ? 500 : c.type === 'blackJoker' ? 400 : c.suit === trump ? 300 + rankValue[c.rank] : c.suit === leadSuit ? 100 + rankValue[c.rank] : rankValue[c.rank];
-  return power(a.card) > power(b.card);
+  return cardPower(a.card, trump, leadSuit) > cardPower(b.card, trump, leadSuit);
 }
 
-function validPlay(room, playerIdx, card) {
-  if (room.phase !== 'playing') return { ok: false, msg: 'Not playing phase.' };
-  if (room.turn !== playerIdx) return { ok: false, msg: 'Not your turn.' };
-  const isLead = room.trick.length === 0;
-  if ((card.type === 'blackJoker' || card.type === 'redJoker') && isLead) return { ok: false, msg: 'Jokers cannot start a trick.' };
-  if (card.type === 'redJoker' && !room.blackJokerUsed) return { ok: false, msg: 'Red Joker can only be used after the Black Joker has been used.' };
-
-  if (card.type === 'blackJoker' && room.trickNumber > 3) return { ok: true, illegalPenalty: true, msg: 'Black Joker used after the first 3 tricks.' };
-  if (card.type === 'redJoker' && room.trickNumber === 9) return { ok: true, illegalPenalty: true, msg: 'Red Joker used in the last trick.' };
-
-  if (!isLead && card.type === 'normal') {
-    const leadSuit = room.trick[0].card.suit;
-    const hasLeadSuit = room.players[playerIdx].hand.some(c => c.type === 'normal' && c.suit === leadSuit);
-    if (hasLeadSuit && card.suit !== leadSuit) return { ok: false, msg: `You must play ${leadSuit} if you have it.` };
-  }
-  return { ok: true };
+function playerHasBothJokers(room, playerIdx) {
+  const hand = room.players[playerIdx].hand;
+  return hand.some(c => c.type === 'blackJoker') && hand.some(c => c.type === 'redJoker');
 }
 
-function finishTrick(room) {
-  const leadSuit = room.trick[0].card.suit;
-  let best = room.trick[0];
-  for (const play of room.trick.slice(1)) if (cardBeats(play, best, room.trump, leadSuit)) best = play;
-  const winner = best.player;
-  room.tricksWon[teamOf(winner)] += 1;
-  addHistory(room, `${room.players[winner].name} wins trick ${room.trickNumber}.`);
-  room.trick = [];
-
-  if (room.bound) {
-    const bidderTeam = teamOf(room.bidWinner);
-    if (teamOf(winner) !== bidderTeam) {
-      room.phase = 'gameover';
-      room.gameLoserTeam = bidderTeam;
-      room.gameWinnerTeam = 1 - bidderTeam;
-      room.message = `Bound failed. Team ${1 - bidderTeam + 1} wins the game.`;
-      return;
-    }
-  }
-
-  if (room.trickNumber >= 9) return scoreRound(room);
-  room.trickNumber += 1;
-  room.leader = winner;
-  room.turn = winner;
-  room.message = `${room.players[winner].name} starts trick ${room.trickNumber}.`;
-}
-
-function scoreRound(room) {
-  const bidderTeam = teamOf(room.bidWinner);
-  const otherTeam = 1 - bidderTeam;
-  if (room.bound) {
-    room.phase = 'gameover';
-    room.gameWinnerTeam = bidderTeam;
-    room.message = `Bound succeeded. Team ${bidderTeam + 1} wins the game.`;
-    return;
-  }
-
-  const bid = Number(room.roundBid);
-  const success = room.tricksWon[bidderTeam] >= bid;
-  if (success) {
-    room.scores[bidderTeam] += bid;
-    room.message = `Bid succeeded. Team ${bidderTeam + 1} gets ${bid} points.`;
-  } else if (room.roundNumber === 1) {
-    room.scores[otherTeam] += bid;
-    room.message = `First-round bid failed. Team ${otherTeam + 1} gets ${bid} points; bidding team gets 0.`;
-  } else {
-    room.scores[bidderTeam] -= bid;
-    room.scores[otherTeam] += bid * 2;
-    room.message = `Bid failed. Team ${bidderTeam + 1} gets -${bid}; Team ${otherTeam + 1} gets ${bid * 2}.`;
-  }
-  addHistory(room, room.message);
-  if (room.scores[0] >= 54 || room.scores[1] >= 54) {
-    room.phase = 'gameover';
-    room.gameWinnerTeam = room.scores[0] >= 54 ? 0 : 1;
-    room.message = `Team ${room.gameWinnerTeam + 1} reached 54 points and wins the game.`;
-  } else {
-    room.phase = 'roundover';
-    room.nextDealer = rightOf(room.bidWinner);
-  }
+function findHolder(room, cardType) {
+  return room.players.findIndex(p => p.hand.some(c => c.type === cardType));
 }
 
 function illegalJokerPenalty(room, offendingPlayer, reason) {
@@ -289,10 +308,224 @@ function illegalJokerPenalty(room, offendingPlayer, reason) {
   const otherTeam = 1 - offendingTeam;
   room.scores[otherTeam] += 15;
   room.phase = room.scores[otherTeam] >= 54 ? 'gameover' : 'roundover';
-  if (room.phase === 'gameover') room.gameWinnerTeam = otherTeam;
+  if (room.phase === 'gameover') {
+    room.gameWinnerTeam = otherTeam;
+    room.scores[otherTeam] = Math.max(room.scores[otherTeam], 54);
+  }
   room.nextDealer = rightOf(offendingPlayer);
   room.message = `${reason} Round ends immediately. Team ${otherTeam + 1} gets 15 points. Team ${offendingTeam + 1} gets 0 for the round.`;
-  addHistory(room, room.message);
+}
+
+function finishMatch(room, winnerTeam, message, loserTeam = null) {
+  room.phase = 'gameover';
+  room.gameWinnerTeam = winnerTeam;
+  room.gameLoserTeam = loserTeam;
+  // A Bound win/loss ends the entire match immediately, so force the visible
+  // scoreboard to show the winning team at the match target.
+  room.scores[winnerTeam] = Math.max(room.scores[winnerTeam], 54);
+  room.trick = [];
+  room.message = message;
+}
+
+function resetMatchForReplay(room) {
+  room.scores = [0, 0];
+  room.gameWinnerTeam = null;
+  room.gameLoserTeam = null;
+  room.roundNumber = 0;
+  room.nextDealer = null;
+  resetForNewRound(room);
+  room.message = `New match started. ${room.players[room.dealer].name} shuffled. ${room.players[room.cutter].name} must cut the deck.`;
+}
+
+function checkStartOfTrickPenalty(room) {
+  // If a player is forced to start trick 3 while holding the Black Joker, the round ends immediately.
+  if (room.phase === 'playing' && room.trickNumber === 3 && room.trick.length === 0) {
+    const leader = room.leader;
+    if (room.players[leader].hand.some(c => c.type === 'blackJoker')) {
+      illegalJokerPenalty(room, leader, `${room.players[leader].name} had to start trick 3 while holding the Black Joker.`);
+      return true;
+    }
+  }
+
+  // Red Joker cannot be held into trick 9.
+  if (room.phase === 'playing' && room.trickNumber === 9 && room.trick.length === 0) {
+    const holder = findHolder(room, 'redJoker');
+    if (holder !== -1) {
+      illegalJokerPenalty(room, holder, `${room.players[holder].name} held the Red Joker until the last trick.`);
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function checkEndOfTrickPenalty(room) {
+  // At the end of trick 3, Black Joker must already be gone.
+  if (room.phase === 'playing' && room.trickNumber === 3 && !room.blackJokerUsed) {
+    const holder = findHolder(room, 'blackJoker');
+    if (holder !== -1) {
+      illegalJokerPenalty(room, holder, `${room.players[holder].name} still had the Black Joker after trick 3.`);
+      return true;
+    }
+  }
+  return false;
+}
+
+function validPlay(room, playerIdx, card) {
+  if (room.phase !== 'playing') return { ok: false, msg: 'Not playing phase.' };
+  if (room.turn !== playerIdx) return { ok: false, msg: 'Not your turn.' };
+
+  const isLead = room.trick.length === 0;
+  if (isJoker(card) && isLead) return { ok: false, msg: 'Jokers cannot start a trick. They can only defend.' };
+
+  if (card.type === 'redJoker' && !room.blackJokerUsed && !playerHasBothJokers(room, playerIdx)) {
+    return { ok: false, msg: 'Red Joker can only be used after the Black Joker, unless you hold both Jokers.' };
+  }
+
+  if (card.type === 'blackJoker' && room.trickNumber > 3) {
+    return { ok: true, illegalPenalty: true, msg: 'Black Joker was used after the first 3 tricks.' };
+  }
+  if (card.type === 'redJoker' && room.trickNumber === 9) {
+    return { ok: true, illegalPenalty: true, msg: 'Red Joker was used in the last trick.' };
+  }
+
+  // If bid is 8 or 9, the starting player of the first trick must lead a Trump Suit card if they have one.
+  const numericBid = Number(room.roundBid);
+  if (isLead && Number.isInteger(numericBid) && numericBid >= 8 && room.trickNumber === 1) {
+    const hasTrump = room.players[playerIdx].hand.some(c => c.type === 'normal' && c.suit === room.trump);
+    if (hasTrump && !(card.type === 'normal' && card.suit === room.trump)) {
+      return { ok: false, msg: 'Because the bid is 8 or more, the first leader must start with a Trump Suit card if they have one.' };
+    }
+  }
+
+  // Jokers are suit-less and may be played defensively even if the player has the lead suit.
+  if (!isLead && card.type === 'normal') {
+    const leadSuit = room.trick[0].card.suit;
+    const hasLeadSuit = room.players[playerIdx].hand.some(c => c.type === 'normal' && c.suit === leadSuit);
+    if (hasLeadSuit && card.suit !== leadSuit) {
+      return { ok: false, msg: `You must play ${leadSuit} if you have it.` };
+    }
+  }
+
+  return { ok: true };
+}
+
+function finishTrick(room) {
+  const leadSuit = room.trick.find(play => play.card.type === 'normal')?.card.suit || null;
+  let best = room.trick[0];
+  for (const play of room.trick.slice(1)) {
+    if (cardBeats(play, best, room.trump, leadSuit)) best = play;
+  }
+
+  const winner = best.player;
+  room.tricksWon[teamOf(winner)] += 1;
+  room.trick = [];
+
+  if (room.bound) {
+    const bidderTeam = teamOf(room.bidWinner);
+    if (teamOf(winner) !== bidderTeam) {
+      const winningTeam = 1 - bidderTeam;
+      finishMatch(room, winningTeam, `Bound failed. Team ${winningTeam + 1} wins the game.`, bidderTeam);
+      return;
+    }
+  }
+
+  if (checkEndOfTrickPenalty(room)) return;
+
+  // Smart Early Termination: after every completed trick, stop immediately
+  // when the bidding team has made the contract or can no longer make it.
+  if (checkSmartEarlyTermination(room)) return;
+
+  if (room.trickNumber >= 9) return scoreRound(room);
+
+  room.trickNumber += 1;
+  room.leader = winner;
+  room.turn = winner;
+  room.message = `${room.players[winner].name} starts trick ${room.trickNumber}.`;
+  checkStartOfTrickPenalty(room);
+}
+
+function checkSmartEarlyTermination(room) {
+  if (room.bound || room.roundBid === 'BOUND') return false;
+
+  const targetTricks = Number(room.roundBid);
+  if (!Number.isInteger(targetTricks)) return false;
+
+  const totalTricksPerRound = 9;
+  const biddingTeam = teamOf(room.bidWinner);
+  const opposingTeam = 1 - biddingTeam;
+  const tricksWonBiddingTeam = room.tricksWon[biddingTeam];
+  const tricksWonOpposingTeam = room.tricksWon[opposingTeam];
+
+  // Condition A: the bidding team reached the target.
+  // The round ends immediately and the score is capped at the declared bid.
+  if (tricksWonBiddingTeam >= targetTricks) {
+    applySuccessfulBid(room, targetTricks, biddingTeam);
+    return true;
+  }
+
+  const maxPossibleRemainingTricks = totalTricksPerRound - tricksWonBiddingTeam - tricksWonOpposingTeam;
+  const targetImpossible = (tricksWonBiddingTeam + maxPossibleRemainingTricks) < targetTricks
+    || tricksWonOpposingTeam > (totalTricksPerRound - targetTricks);
+
+  // Condition B: the defenders have locked the bidding team out mathematically.
+  if (targetImpossible) {
+    applyFailedBid(room, targetTricks, biddingTeam, opposingTeam, true);
+    return true;
+  }
+
+  return false;
+}
+
+function applySuccessfulBid(room, bid, bidderTeam) {
+  room.scores[bidderTeam] += bid;
+  room.trick = [];
+  room.message = `Bid reached. Team ${bidderTeam + 1} gets exactly ${bid} points. The remaining cards are skipped.`;
+  finishRoundTransition(room);
+}
+
+function applyFailedBid(room, bid, bidderTeam, otherTeam, early = false) {
+  if (room.roundNumber === 1) {
+    room.scores[otherTeam] += bid;
+    room.message = `${early ? 'Bid became impossible' : 'First-round bid failed'}. Team ${otherTeam + 1} gets ${bid} points; bidding team gets 0.`;
+  } else {
+    room.scores[bidderTeam] -= bid;
+    room.scores[otherTeam] += bid * 2;
+    room.message = `${early ? 'Bid became impossible' : 'Bid failed'}. Team ${bidderTeam + 1} gets -${bid}; Team ${otherTeam + 1} gets ${bid * 2}.`;
+  }
+  finishRoundTransition(room);
+}
+
+function finishRoundTransition(room) {
+  if (room.scores[0] >= 54 || room.scores[1] >= 54) {
+    room.phase = 'gameover';
+    room.gameWinnerTeam = room.scores[0] >= 54 ? 0 : 1;
+    room.scores[room.gameWinnerTeam] = Math.max(room.scores[room.gameWinnerTeam], 54);
+    room.message += ` Team ${room.gameWinnerTeam + 1} reached 54 points and wins the game.`;
+  } else {
+    room.phase = 'roundover';
+    room.nextDealer = rightOf(room.bidWinner);
+  }
+}
+
+function scoreRound(room) {
+  const bidderTeam = teamOf(room.bidWinner);
+  const otherTeam = 1 - bidderTeam;
+
+  if (room.bound) {
+    finishMatch(room, bidderTeam, `Bound succeeded. Team ${bidderTeam + 1} wins the game.`);
+    return;
+  }
+
+  const bid = Number(room.roundBid);
+  const tricks = room.tricksWon[bidderTeam];
+  const success = tricks >= bid;
+
+  if (success) {
+    applySuccessfulBid(room, bid, bidderTeam);
+  } else {
+    applyFailedBid(room, bid, bidderTeam, otherTeam, false);
+  }
 }
 
 io.on('connection', socket => {
@@ -303,13 +536,33 @@ io.on('connection', socket => {
     emitRoom(room);
   });
 
-  socket.on('joinRoom', ({ code: roomCode, name }) => {
+  socket.on('joinRoom', ({ code: roomCode, name, mode = 'player' }) => {
     const room = rooms.get((roomCode || '').toUpperCase());
     if (!room) return socket.emit('errorMessage', 'Room not found.');
-    if (room.players.length >= 4) return socket.emit('errorMessage', 'Room is full.');
-    room.players.push({ id: socket.id, name: name || `Player ${room.players.length + 1}`, connected: true, hand: [] });
+
+    const displayName = name || (mode === 'spectator' ? 'Spectator' : `Player ${room.players.length + 1}`);
     socket.join(room.code);
+
+    if (mode === 'spectator') {
+      room.spectators.push({ id: socket.id, name: displayName, connected: true });
+      socket.emit('joined', { code: room.code });
+      room.message = `${displayName} joined as a spectator.`;
+      emitRoom(room);
+      return;
+    }
+
+    if (room.players.length >= 4) {
+      room.spectators.push({ id: socket.id, name: displayName, connected: true });
+      socket.emit('joined', { code: room.code });
+      room.message = `${displayName} joined as a spectator because all active seats are full.`;
+      emitRoom(room);
+      return;
+    }
+
+    room.players.push({ id: socket.id, name: displayName, connected: true, hand: [] });
+    socket.emit('joined', { code: room.code });
     if (room.players.length === 4) room.message = 'Four players joined. Host can start the round.';
+    else room.message = `${displayName} joined as Player ${room.players.length}.`;
     emitRoom(room);
   });
 
@@ -321,14 +574,13 @@ io.on('connection', socket => {
     emitRoom(room);
   });
 
-  socket.on('cutDeck', ({ code: roomCode }) => {
+  socket.on('cutDeck', ({ code: roomCode, cutAt }) => {
     const room = rooms.get(roomCode);
     if (!room) return;
     const idx = room.players.findIndex(p => p.id === socket.id);
     if (room.phase !== 'cut' || idx !== room.cutter) return;
-    const cutAt = Math.floor(Math.random() * 35) + 1;
-    room.deck = [...room.deck.slice(cutAt), ...room.deck.slice(0, cutAt)];
-    addHistory(room, `${room.players[idx].name} cut the deck.`);
+    const safeCut = Number.isInteger(cutAt) && cutAt > 0 && cutAt < 36 ? cutAt : Math.floor(Math.random() * 35) + 1;
+    room.deck = [...room.deck.slice(safeCut), ...room.deck.slice(0, safeCut)];
     deal(room);
     emitRoom(room);
   });
@@ -338,17 +590,29 @@ io.on('connection', socket => {
     if (!room) return;
     const idx = room.players.findIndex(p => p.id === socket.id);
     if (room.phase !== 'bidding' || idx !== room.biddingTurn) return;
-    if (value === 'BOUND') {
-      room.currentBid = 'BOUND'; room.currentBidder = idx; finalizeBid(room, idx); emitRoom(room); return;
+
+    const minBid = getMinimumBid(room, idx);
+
+    if (value === 'BOUND' || Number(value) === 9) {
+      room.currentBid = 'BOUND';
+      room.currentBidder = idx;
+      finalizeBid(room, idx);
+      emitRoom(room);
+      return;
     }
+
     const bid = Number(value);
-    if (!Number.isInteger(bid) || bid < 5 || bid > 9) return socket.emit('errorMessage', 'Bid must be 5 to 9, or Bound.');
-    if (room.currentBid !== null && room.currentBid !== 'BOUND' && bid <= room.currentBid) return socket.emit('errorMessage', 'Bid must be higher than current bid.');
+    if (!Number.isInteger(bid) || bid < minBid || bid > 8) {
+      return socket.emit('errorMessage', `Your minimum bid is ${minBid}. Select Bound if you want to bid all 9 tricks.`);
+    }
+    if (room.currentBid !== null && room.currentBid !== 'BOUND' && bid <= room.currentBid) {
+      return socket.emit('errorMessage', 'Bid must be higher than current bid.');
+    }
+
     room.currentBid = bid;
     room.currentBidder = idx;
     room.skipped[idx] = false;
-    addHistory(room, `${room.players[idx].name} bids ${bid}.`);
-    room.biddingTurn = nextActiveBidder(room, idx);
+    room.biddingTurn = nextUnskippedBidder(room, idx);
     checkBiddingEnd(room);
     emitRoom(room);
   });
@@ -358,10 +622,10 @@ io.on('connection', socket => {
     if (!room) return;
     const idx = room.players.findIndex(p => p.id === socket.id);
     if (room.phase !== 'bidding' || idx !== room.biddingTurn) return;
+
     room.skipped[idx] = true;
-    addHistory(room, `${room.players[idx].name} skips.`);
     checkBiddingEnd(room);
-    if (room.phase === 'bidding') room.biddingTurn = nextActiveBidder(room, idx);
+    if (room.phase === 'bidding') room.biddingTurn = nextUnskippedBidder(room, idx);
     emitRoom(room);
   });
 
@@ -370,13 +634,14 @@ io.on('connection', socket => {
     if (!room) return;
     const idx = room.players.findIndex(p => p.id === socket.id);
     if (room.phase !== 'chooseTrump' || idx !== room.bidWinner || !suits.includes(suit)) return;
+
     room.trump = suit;
     room.phase = 'playing';
     room.leader = rightOf(room.bidWinner);
     room.turn = room.leader;
     room.trickNumber = 1;
-    room.message = `${room.players[idx].name} chose ${suit} as power suit. ${room.players[room.leader].name} starts.`;
-    addHistory(room, room.message);
+    room.message = `${room.players[idx].name} chose ${suit} as the Trump Suit. ${room.bound ? 'Bound is active. ' : ''}${room.players[room.leader].name} starts.`;
+    checkStartOfTrickPenalty(room);
     emitRoom(room);
   });
 
@@ -387,16 +652,24 @@ io.on('connection', socket => {
     const hand = room.players[idx]?.hand || [];
     const cardIndex = hand.findIndex(c => c.id === cardId);
     if (cardIndex < 0) return;
-    const card = hand[cardIndex];
-    const valid = validPlay(room, idx, card);
+
+    const valid = validPlay(room, idx, hand[cardIndex]);
     if (!valid.ok) return socket.emit('errorMessage', valid.msg);
-    hand.splice(cardIndex, 1);
-    if (valid.illegalPenalty) { illegalJokerPenalty(room, idx, valid.msg); emitRoom(room); return; }
+
+    const [card] = hand.splice(cardIndex, 1);
+
+    if (valid.illegalPenalty) {
+      illegalJokerPenalty(room, idx, valid.msg);
+      emitRoom(room);
+      return;
+    }
+
     if (card.type === 'blackJoker') room.blackJokerUsed = true;
     room.trick.push({ player: idx, card });
-    addHistory(room, `${room.players[idx].name} plays ${card.label}.`);
+
     if (room.trick.length === 4) finishTrick(room);
     else room.turn = rightOf(idx);
+
     emitRoom(room);
   });
 
@@ -405,13 +678,80 @@ io.on('connection', socket => {
     if (!room) return;
     const idx = room.players.findIndex(p => p.id === socket.id);
     if (room.phase !== 'playing' || idx !== room.bidWinner || room.bound || room.roundBid === 'BOUND') return;
+
+    if (room.trickNumber > 7) return socket.emit('errorMessage', 'Bound can only be called before or during trick 7.');
+
     const bidderTeam = teamOf(room.bidWinner);
-    if (room.tricksWon[bidderTeam] >= Number(room.roundBid)) return socket.emit('errorMessage', 'You can only call Bound before completing your original bid.');
-    const completed = room.trickNumber - 1;
-    if (room.tricksWon[bidderTeam] !== completed) return socket.emit('errorMessage', 'Bound can only be called if your team has won every trick so far.');
+    const completedTricks = room.trickNumber - 1;
+    if (room.tricksWon[bidderTeam] !== completedTricks) {
+      return socket.emit('errorMessage', 'You can only call Bound if your team has won every completed trick so far.');
+    }
+
     room.bound = true;
     room.message = `${room.players[idx].name} called Bound during play. They must win all 9 tricks or lose the game.`;
-    addHistory(room, room.message);
+    emitRoom(room);
+  });
+
+  socket.on('sendChat', ({ code: roomCode, text }) => {
+    const room = rooms.get(roomCode);
+    if (!room) return;
+    const cleanText = String(text || '').trim().slice(0, 300);
+    if (!cleanText) return;
+
+    const active = room.players.find(p => p.id === socket.id);
+    const spectator = (room.spectators || []).find(s => s.id === socket.id);
+    const senderName = active?.name || spectator?.name || 'Unknown';
+    const role = active ? 'player' : 'spectator';
+    room.chat = [...(room.chat || []), { senderName, role, text: cleanText, at: Date.now() }].slice(-50);
+    emitRoom(room);
+  });
+
+  socket.on('kickUser', ({ code: roomCode, targetId }) => {
+    const room = rooms.get(roomCode);
+    if (!room || socket.id !== room.hostId || targetId === room.hostId) return;
+
+    const activeIdx = room.players.findIndex(p => p.id === targetId);
+    const spectatorIdx = (room.spectators || []).findIndex(s => s.id === targetId);
+    let targetName = 'User';
+
+    if (activeIdx !== -1) {
+      targetName = room.players[activeIdx].name;
+      room.players.splice(activeIdx, 1);
+      if (room.phase !== 'lobby') {
+        clearRoundStateToLobby(room, `${targetName} was kicked by the host. The current round was cancelled and the room returned to the lobby.`);
+      } else {
+        room.message = `${targetName} was kicked by the host.`;
+      }
+    } else if (spectatorIdx !== -1) {
+      targetName = room.spectators[spectatorIdx].name;
+      room.spectators.splice(spectatorIdx, 1);
+      room.message = `${targetName} was kicked by the host.`;
+    } else {
+      return;
+    }
+
+    io.to(targetId).emit('kicked', 'You were removed from the room by the host.');
+    const targetSocket = io.sockets.sockets.get(targetId);
+    if (targetSocket) targetSocket.leave(room.code);
+    emitRoom(room);
+  });
+
+  socket.on('moveToSpectator', ({ code: roomCode, targetId }) => {
+    const room = rooms.get(roomCode);
+    if (!room || socket.id !== room.hostId || targetId === room.hostId) return;
+
+    const activeIdx = room.players.findIndex(p => p.id === targetId);
+    if (activeIdx === -1) return;
+
+    const [player] = room.players.splice(activeIdx, 1);
+    player.hand = [];
+    room.spectators.push({ id: player.id, name: player.name, connected: player.connected });
+
+    if (room.phase !== 'lobby') {
+      clearRoundStateToLobby(room, `${player.name} was moved to spectators by the host. The current round was cancelled and the room returned to the lobby.`);
+    } else {
+      room.message = `${player.name} was moved to spectators. A new active player can now join.`;
+    }
     emitRoom(room);
   });
 
@@ -423,10 +763,21 @@ io.on('connection', socket => {
     emitRoom(room);
   });
 
+  socket.on('playAgain', ({ code: roomCode }) => {
+    const room = rooms.get(roomCode);
+    if (!room || room.phase !== 'gameover' || socket.id !== room.hostId) return;
+    if (room.players.length !== 4) return socket.emit('errorMessage', 'Need exactly 4 active players to start a new match.');
+    resetMatchForReplay(room);
+    emitRoom(room);
+  });
+
   socket.on('disconnect', () => {
     for (const room of rooms.values()) {
       const p = room.players.find(p => p.id === socket.id);
-      if (p) { p.connected = false; emitRoom(room); }
+      const s = (room.spectators || []).find(s => s.id === socket.id);
+      if (p) p.connected = false;
+      if (s) s.connected = false;
+      if (p || s) emitRoom(room);
     }
   });
 });

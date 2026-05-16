@@ -1,14 +1,14 @@
-# Dependencies
+# dependencies
 node_modules/
 client/node_modules/
 
-# Build output
+# build output
 dist/
 client/dist/
 build/
 client/build/
 
-# Environment variables / secrets
+# environment / secrets
 .env
 .env.local
 .env.*.local
@@ -16,7 +16,7 @@ client/.env
 client/.env.local
 client/.env.*.local
 
-# Logs
+# logs
 logs/
 *.log
 npm-debug.log*
@@ -24,40 +24,15 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
-# Runtime files
-pids/
-*.pid
-*.seed
-*.pid.lock
-
-# Cache
-.cache/
-.parcel-cache/
-.vite/
-client/.vite/
-.npm/
-.eslintcache
-
-# OS files
+# OS / editor
 .DS_Store
 Thumbs.db
-ehthumbs.db
 Desktop.ini
-
-# Editor folders
 .vscode/
 .idea/
 
-# Temporary files
-tmp/
-temp/
-
-# Coverage reports
-coverage/
-client/coverage/
-
-# Lock files - optional
-# Keep package-lock.json if you want consistent installs.
-# Do NOT ignore it unless you know why.
-# package-lock.json
-# client/package-lock.json
+# cache
+.cache/
+.vite/
+client/.vite/
+.eslintcache
