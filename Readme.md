@@ -1,4 +1,4 @@
-<img width="1204" height="880" alt="Gemini_Generated_Image_vjzx4cvjzx4cvjzx" src="https://github.com/user-attachments/assets/9be975e6-0c60-4760-bb9d-45d911b7f050" />
+<img width="1205" height="880" alt="Gemini_Generated_Image_93yvce93yvce93yv" src="https://github.com/user-attachments/assets/a0504cd0-6121-4e6a-bcfb-5cbff6fdc9f0" />
 
 How "Bound" Came to Life: The Backstory ☕
 
