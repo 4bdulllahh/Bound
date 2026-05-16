@@ -10,7 +10,6 @@ Eventually, we got tired of carrying a physical deck everywhere (and getting sid
 
 * **The Custom 36-Card Chaos:** We ditched the standard deck. It's 6-A for Spades and Hearts, 7-A for Clubs and Diamonds, plus a Black and Red Joker thrown in just to mess with everyone's strategy.
 * **The Anti-Clockwise Grind:** Turns, bidding, and card-throwing strictly move anti-clockwise. No exceptions.
-* **The Sweaty Hard AI:** We got tired of playing 1v1, so we built bots that actually count cards. They know how to follow suit, they know when to pull trumps, and they will absolutely drop the Black Joker early just to save themselves from a penalty.
 * **The "15-Point" Joker Traps:** If you hold the Black Joker past Round 3, or if you're dumb enough to save the Red Joker for the absolute final trick (Round 9), the game calls a foul, ends the round, and hands the other team a free +15 points.
 * **Smart Rage-Quitting (Early Termination):** We coded a math checker that runs after every single trick. The exact second a team hits their bid target—or the exact moment it becomes mathematically impossible for them to win—the round automatically cuts short, updates the scores, and shuffles a fresh deck. No wasted time.
 * **Going "Bound":** If you're feeling cocky before Round 7 and think your hand can sweep all 9 tricks, you call **Bound**. Pull it off? You win the whole match on the spot. Fail even one trick? Instant match over, you lose. First team to 54 standard points wins otherwise.
