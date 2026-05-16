@@ -1,3 +1,4 @@
+<img width="468" height="342" alt="image" src="https://github.com/user-attachments/assets/46553671-2812-4c37-b0db-3fffb896320a" />
 
 How "Bound" Came to Life: The Backstory ☕
 
