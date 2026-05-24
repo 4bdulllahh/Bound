@@ -2,6 +2,8 @@ import React, { useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { io } from 'socket.io-client';
 import {
+  CheckCircle,
+  Clock,
   Copy,
   Crown,
   Eye,
@@ -12,7 +14,8 @@ import {
   Sparkles,
   Swords,
   Trophy,
-  Users
+  Users,
+  X
 } from 'lucide-react';
 import './styles.css';
 
@@ -22,6 +25,8 @@ const suitSymbols = { hearts: '♥', spades: '♠', clubs: '♣', diamonds: '♦
 const suitNames = { hearts: 'Hearts', spades: 'Spades', clubs: 'Clubs', diamonds: 'Diamonds' };
 const suitOrder = { hearts: 0, spades: 1, clubs: 2, diamonds: 3 };
 const rankOrder = { '6': 6, '7': 7, '8': 8, '9': 9, '10': 10, J: 11, Q: 12, K: 13, A: 14 };
+const teamName = team => team === 0 ? 'Team A' : 'Team B';
+const isOccupiedPlayer = p => Boolean(p && !p.empty);
 
 function App() {
   const [state, setState] = useState(null);
@@ -56,19 +61,19 @@ function App() {
 }
 
 function Landing({ name, setName, roomCode, setRoomCode, error }) {
+  const [showRules, setShowRules] = useState(false);
   const create = () => socket.emit('createRoom', { name: name.trim() || 'Player' });
   const join = () => socket.emit('joinRoom', { code: roomCode.trim().toUpperCase(), name: name.trim() || 'Player', mode: 'player' });
   const spectate = () => socket.emit('joinRoom', { code: roomCode.trim().toUpperCase(), name: name.trim() || 'Spectator', mode: 'spectator' });
 
   return (
-    <main className="landing">
-      <section className="hero cardPanel">
+    <main className="landing landingSimple">
+      {showRules && <RulesModal onClose={() => setShowRules(false)} />}
+      <section className="hero cardPanel landingMenuPanel">
         <div className="brand"><Swords /> Bound</div>
         <h1>A live team card game for four players.</h1>
         <p>Bid, choose Trump Suit, defend with Jokers, call Bound, and race to 54 points.</p>
-        <div className="landingPreview" aria-hidden="true">
-          <span>♥ 6–A</span><span>♠ 6–A</span><span>♣ 7–A</span><span>♦ 7–A</span><span>🃏🃏</span>
-        </div>
+        <button className="secondary howButton" onClick={() => setShowRules(true)}><HelpCircle size={17}/> Rules / How to Play</button>
         <div className="formGrid">
           <input placeholder="Your name" value={name} onChange={e => setName(e.target.value)} />
           <button onClick={create}>Create Room</button>
@@ -83,6 +88,21 @@ function Landing({ name, setName, roomCode, setRoomCode, error }) {
       </section>
     </main>
   );
+}
+
+function HowToPlayContent({ compact = false }) {
+  const items = [
+    ['Teams', 'Four players sit around the table. Opposite seats are teammates: Team A is top/bottom and Team B is left/right.'],
+    ['Bidding', 'Players bid how many tricks their team will win. Normal minimum is 6. A bid of 5 only appears when the first three players skip.'],
+    ['Trump Suit', 'The highest bidder chooses the Trump Suit after winning the auction. Trump cards beat normal lead-suit cards.'],
+    ['Tricks', 'Follow the lead suit if you have it. If you cannot, you may play Trump, a filler card, or a valid Joker.'],
+    ['Jokers', 'Jokers cannot start a trick. Black Joker must be used within the first 3 tricks. Red Joker beats Black but cannot be held into the last trick.'],
+    ['Bound', 'Bound means your team promises all 9 tricks. Success wins the match immediately. Failure loses the match immediately.'],
+    ['Scoring', 'Reach 54 points to win. Smart early termination ends the round as soon as the bid is made or becomes impossible.'],
+    ['No History', 'Played-card history is hidden. Counting cards manually is part of the game skill.']
+  ];
+
+  return <div className={compact ? 'howList compact' : 'howList'}>{items.map(([title, text]) => <RuleBlock key={title} title={title} text={text} />)}</div>;
 }
 
 function Game({ state, error }) {
@@ -119,62 +139,45 @@ function Game({ state, error }) {
         <aside className="leftRail cardPanel">
           <SectionTitle icon={<Users size={18}/>} title="Teams & Players" />
           <TeamPanels state={state} />
-          <SpectatorList state={state} isHost={isHost} />
-          <HostControlsHint isHost={isHost} />
+          <GameStatusPanel state={state} isMyTurn={isMyTurn} myBidTurn={myBidTurn} canChooseTrump={canChooseTrump} canCut={canCut} />
         </aside>
 
-        <section className="tableColumn">
-          <RoundVitals state={state} isMyTurn={isMyTurn} myBidTurn={myBidTurn} />
-
-          <div className="tableStage cardPanel">
+        <section className="tableColumn noVitalsColumn">
+          <div className={`tableStage cardPanel ${state.phase === 'lobby' ? 'lobbyStage' : ''} ${state.phase === 'lobby' && isHost ? 'hostLobbyStage' : ''} ${state.phase === 'gameover' ? 'gameoverStage' : ''}`}>
             <SeatedTable state={state} />
-            <div className="centerFelt">
-              <div className="statusPanel">
-                <p className="phaseLabel">{phaseTitle(state)}</p>
-                <h2>{importantStatus(state, isMyTurn, myBidTurn, canChooseTrump, canCut)}</h2>
-                <p>{state.message}</p>
-              </div>
-
-              {state.phase === 'lobby' && <LobbyActions state={state} isHost={isHost} />}
+            <div className={`centerFelt cleanCenter ${state.phase === 'gameover' ? 'gameOverCenter' : ''} ${state.phase === 'chooseTrump' ? 'trumpCenter' : ''}`}>
+              {state.phase === 'lobby' && <LobbyActions state={state} isHost={isHost} isSpectator={isSpectator} me={me} />}
               {state.phase === 'cut' && <ActionButton disabled={!canCut} onClick={() => socket.emit('cutDeck', { code: state.code })}>{canCut ? 'Cut Deck' : 'Waiting for cutter'}</ActionButton>}
               {state.phase === 'bidding' && <Bidding state={state} enabled={myBidTurn} />}
               {state.phase === 'chooseTrump' && <TrumpPicker state={state} enabled={canChooseTrump} />}
               {(state.phase === 'playing' || state.phase === 'roundover' || state.phase === 'gameover') && <Board state={state} />}
-              {canCallBound && <button className="danger boundPulse" onClick={() => socket.emit('callBoundDuringPlay', { code: state.code })}><Sparkles size={17}/> Call Bound</button>}
               {state.phase === 'roundover' && <ActionButton onClick={() => socket.emit('nextRound', { code: state.code })}><RotateCcw size={16}/> Start Next Round</ActionButton>}
               {state.phase === 'gameover' && <GameOver state={state} isHost={isHost} />}
             </div>
           </div>
+        
+
+          <section className="handDock cardPanel cardsOnlyHand">
+            {isSpectator ? (
+              <div className="spectatorNotice"><Eye /> Spectators see table state, scores, tricks, and chat only.</div>
+            ) : (
+              <div className="cards">
+                {sortedHand.map(card => {
+                  const meta = getCardPlayMeta(card, state, sortedHand, isMyTurn);
+                  return <Card key={card.id} card={card} meta={meta} onClick={() => socket.emit('playCard', { code: state.code, cardId: card.id })} />;
+                })}
+              </div>
+            )}
+          </section>
         </section>
 
         <aside className="rightRail cardPanel">
           <SectionTitle icon={<Shield size={18}/>} title="Round Info" />
           <Info state={state} />
-          <hr />
-          <MemoryMode />
-          <Chat state={state} />
+          <BoundAction state={state} canCallBound={canCallBound} />
+          <SpectatorList state={state} isHost={isHost} />
+          {isSpectator && <Chat state={state} />}
         </aside>
-      </section>
-
-      <section className="handDock cardPanel">
-        <div className="handHeader">
-          <div>
-            <h2>{isSpectator ? 'Spectator View' : 'Your Hand'}</h2>
-            <p className="muted">{me ? `${me.name} · Team ${me.team + 1}` : 'Spectators cannot see hidden hands.'}</p>
-          </div>
-          {!isSpectator && <p className="handHint">Cards auto-sort by suit. Jokers stay on the far right.</p>}
-        </div>
-
-        {isSpectator ? (
-          <div className="spectatorNotice"><Eye /> Spectators see table state, scores, tricks, and chat only.</div>
-        ) : (
-          <div className="cards">
-            {sortedHand.map(card => {
-              const meta = getCardPlayMeta(card, state, sortedHand, isMyTurn);
-              return <Card key={card.id} card={card} meta={meta} onClick={() => socket.emit('playCard', { code: state.code, cardId: card.id })} />;
-            })}
-          </div>
-        )}
       </section>
     </main>
   );
@@ -190,7 +193,7 @@ function Scoreboard({ scores }) {
     <div className="scoreboard" aria-label="Scoreboard">
       {[0, 1].map(team => (
         <div key={team} className={`scoreCard team${team + 1} ${leader === team ? 'leading' : ''}`}>
-          <span>Team {team + 1}</span>
+          <span>{teamName(team)}</span>
           <b>{scores[team]}</b>
           <small>{leader === team ? 'Leading' : 'Target 54'}</small>
         </div>
@@ -204,7 +207,7 @@ function TeamPanels({ state }) {
     <div className="teamPanels">
       {[0, 1].map(team => (
         <div className={`teamPanel team${team + 1}`} key={team}>
-          <div className="teamTitle"><Crown size={15}/> Team {team + 1}</div>
+          <div className="teamTitle"><Crown size={15}/> {teamName(team)}</div>
           {state.players.filter(p => p.team === team).map(p => <PlayerRow key={p.seat} p={p} state={state} />)}
         </div>
       ))}
@@ -213,37 +216,41 @@ function TeamPanels({ state }) {
 }
 
 function PlayerRow({ p, state }) {
-  const badges = playerBadges(p, state);
-  const isMe = state.meSeat === p.seat;
-  const isActive = state.turn === p.seat || state.biddingTurn === p.seat || state.cutter === p.seat || state.bidWinner === p.seat;
+  const occupied = isOccupiedPlayer(p);
+  const badges = occupied ? playerBadges(p, state) : [];
+  const isMe = occupied && state.meSeat === p.seat;
+  const isActive = occupied && (state.turn === p.seat || state.biddingTurn === p.seat || state.cutter === p.seat || state.bidWinner === p.seat);
   return (
-    <div className={`playerRow ${isMe ? 'self' : ''} ${isActive ? 'active' : ''} ${!p.connected ? 'offline' : ''}`}>
+    <div className={`playerRow ${isMe ? 'self' : ''} ${isActive ? 'active' : ''} ${occupied && !p.connected ? 'offline' : ''} ${!occupied ? 'openRow' : ''}`}>
       <div>
-        <b>{p.name}</b>
+        <b>{occupied ? p.name : 'Open seat'}</b>
         <span>Seat {p.seat + 1}{isMe ? ' · You' : ''}</span>
       </div>
-      <div className="badges">{badges.map(b => <em key={b}>{b}</em>)}</div>
+      <div className="badges">{occupied ? badges.map(b => <em key={b}>{b}</em>) : <em>Open</em>}</div>
     </div>
   );
 }
 
 function playerBadges(p, state) {
+  if (!isOccupiedPlayer(p)) return [];
   const badges = [];
   if (state.dealer === p.seat) badges.push('Shuffler');
   if (state.cutter === p.seat) badges.push('Cutter');
   if (state.biddingTurn === p.seat) badges.push('Bid turn');
   if (state.bidWinner === p.seat) badges.push('Bid winner');
   if (state.turn === p.seat) badges.push('Play turn');
+  if (p.ready && state.phase === 'lobby') badges.push('Ready');
   return badges;
 }
 
 function SpectatorList({ state, isHost }) {
-  if (!state.spectators?.length && !isHost) return null;
+  const spectators = state.spectators || [];
+
   return (
     <div className="spectators">
       <h3><Eye size={15}/> Spectators</h3>
-      {!state.spectators?.length && <p className="muted smallText">No spectators yet.</p>}
-      {(state.spectators || []).map((s, i) => (
+      {!spectators.length && <p className="muted smallText">No spectators yet.</p>}
+      {spectators.map((s, i) => (
         <div className={`spectator ${!s.connected ? 'offline' : ''}`} key={`${s.name}-${i}`}>
           <span>{s.name}</span>
           {isHost && s.id && <button className="mini dangerMini" onClick={() => socket.emit('kickUser', { code: state.code, targetId: s.id })}>Kick</button>}
@@ -257,6 +264,37 @@ function HostControlsHint({ isHost }) {
   if (!isHost) return null;
   return <p className="hostHint">Host controls are available on the seat cards around the table.</p>;
 }
+
+function GameStatusPanel({ state, isMyTurn, myBidTurn, canChooseTrump, canCut }) {
+  return (
+    <div className="sideStatusPanel">
+      <p className="phaseLabel">{phaseTitle(state)}</p>
+      <h3>{importantStatus(state, isMyTurn, myBidTurn, canChooseTrump, canCut)}</h3>
+      <p>{state.message}</p>
+      <Countdown state={state} />
+    </div>
+  );
+}
+
+function Countdown({ state }) {
+  const [now, setNow] = useState(Date.now());
+  React.useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 250);
+    return () => clearInterval(id);
+  }, []);
+
+  if (!state.timer?.deadline) return null;
+  const remaining = Math.max(0, Math.ceil((state.timer.deadline - now) / 1000));
+  const urgent = remaining <= 5;
+  return (
+    <div className={`timerBadge ${urgent ? 'urgent' : ''}`}>
+      <Clock size={16}/>
+      <span>{remaining}s</span>
+      <small>Turn timer</small>
+    </div>
+  );
+}
+
 
 function RoundVitals({ state, isMyTurn, myBidTurn }) {
   const bidText = displayBid(state.roundBid || state.currentBid || 'None');
@@ -279,7 +317,7 @@ function RoundVitals({ state, isMyTurn, myBidTurn }) {
       </div>
       <div className="vitalItem">
         <span>Tricks</span>
-        <b>Team 1 {state.tricksWon[0]} · Team 2 {state.tricksWon[1]}</b>
+        <b className="trickScoreLine"><span>Team A: {state.tricksWon[0]}</span><span>Team B: {state.tricksWon[1]}</span></b>
       </div>
       <div className="vitalItem">
         <span>Round</span>
@@ -300,41 +338,59 @@ function SeatedTable({ state }) {
   );
 }
 
-function getSeatPositions(state) {
-  const base = state.meSeat !== null ? state.meSeat : 0;
+function getSeatPositions() {
+  // Fixed table layout: Team A sits top/bottom, Team B sits left/right.
+  // This mirrors the real table instead of rotating differently for each player.
   return [
-    { seat: (base + 2) % 4, pos: 'top' },
-    { seat: (base + 1) % 4, pos: 'right' },
-    { seat: base, pos: 'bottom' },
-    { seat: (base + 3) % 4, pos: 'left' }
+    { seat: 0, pos: 'top' },
+    { seat: 1, pos: 'left' },
+    { seat: 2, pos: 'bottom' },
+    { seat: 3, pos: 'right' }
   ];
 }
 
 function SeatCard({ seat, pos, state }) {
   const p = state.players[seat];
+  const occupied = isOccupiedPlayer(p);
   const isHost = state.meIsHost;
-  const isMe = state.meSeat === seat;
-  const isTeammate = state.meSeat !== null && p?.team === state.players[state.meSeat]?.team && !isMe;
-  const badges = p ? playerBadges(p, state) : [];
-  const isActive = state.turn === seat || state.biddingTurn === seat || state.cutter === seat;
+  const isMe = occupied && state.meSeat === seat;
+  const isTeammate = occupied && state.meSeat !== null && p?.team === state.players[state.meSeat]?.team && !isMe;
+  const badges = occupied ? playerBadges(p, state) : [];
+  const isActive = occupied && (state.turn === seat || state.biddingTurn === seat || state.cutter === seat);
+  const canChangeSeats = state.phase === 'lobby';
+  const canJoinThisSeat = canChangeSeats && !occupied;
 
   return (
-    <div className={`seatCard seat-${pos} team${p ? p.team + 1 : 'Open'} ${isMe ? 'self' : ''} ${isTeammate ? 'teammate' : ''} ${isActive ? 'activeTurn' : ''} ${p && !p.connected ? 'offline' : ''}`}>
-      {p ? (
+    <div className={`seatCard seat-${pos} team${occupied ? p.team + 1 : 'Open'} ${isMe ? 'self' : ''} ${isTeammate ? 'teammate' : ''} ${isActive ? 'activeTurn' : ''} ${occupied && !p.connected ? 'offline' : ''}`}>
+      {occupied ? (
         <>
           <div className="seatMeta">
             <span>Seat {seat + 1}</span>
             <b>{p.name}</b>
-            <small>{isMe ? 'You' : isTeammate ? 'Your teammate' : `Team ${p.team + 1}`}</small>
+            <small>{isMe ? 'You' : isTeammate ? 'Your teammate' : teamName(p.team)}</small>
           </div>
           <div className="badges">{badges.map(b => <em key={b}>{b}</em>)}</div>
-          {isHost && p.id && p.id !== socket.id && <div className="adminControls">
-            <button className="mini dangerMini" onClick={() => socket.emit('kickUser', { code: state.code, targetId: p.id })}>Kick</button>
+          {canChangeSeats && isMe && <div className="adminControls">
+            <button className="mini" onClick={() => socket.emit('leaveSeat', { code: state.code })}>Leave Seat</button>
+          </div>}
+          {isHost && p.id && canChangeSeats && <div className="adminControls hostSeatControls">
+            {p.id !== socket.id && <button className="mini dangerMini" onClick={() => socket.emit('kickUser', { code: state.code, targetId: p.id })}>Kick</button>}
             <button className="mini" onClick={() => socket.emit('moveToSpectator', { code: state.code, targetId: p.id })}>Spectate</button>
+            <select className="miniSelect" defaultValue="" onChange={e => { if (e.target.value !== '') socket.emit('movePlayerToSeat', { code: state.code, targetId: p.id, seat: Number(e.target.value) }); e.target.value = ''; }}>
+              <option value="">Move seat</option>
+              {state.players.map(target => target.seat).filter(targetSeat => targetSeat !== seat).map(targetSeat => (
+                <option key={targetSeat} value={targetSeat}>Seat {targetSeat + 1} · {teamName(state.players[targetSeat]?.team)}</option>
+              ))}
+            </select>
           </div>}
         </>
       ) : (
-        <div className="seatMeta emptySeat"><span>Seat {seat + 1}</span><b>Open seat</b><small>Waiting</small></div>
+        <div className="seatMeta emptySeat">
+          <span>Seat {seat + 1}</span>
+          <b>Open seat</b>
+          <small>{teamName(p?.team ?? seat % 2)}</small>
+          {canJoinThisSeat && <button className="mini joinSeatButton" onClick={() => socket.emit('joinSeat', { code: state.code, seat })}>Join Seat</button>}
+        </div>
       )}
     </div>
   );
@@ -361,6 +417,23 @@ function InfoCard({ label, value, highlight }) {
   return <div className={`infoCard ${highlight ? 'highlight' : ''}`}><span>{label}</span><b>{value}</b></div>;
 }
 
+function BoundAction({ state, canCallBound }) {
+  return (
+    <div className="boundSideBox">
+      <div>
+        <span>Bound action</span>
+        <b>{state.bound ? 'Bound is active' : canCallBound ? 'Available now' : 'Not available'}</b>
+      </div>
+      {canCallBound && (
+        <button className="danger boundPulse" onClick={() => socket.emit('callBoundDuringPlay', { code: state.code })}>
+          <Sparkles size={17}/> Call Bound
+        </button>
+      )}
+    </div>
+  );
+}
+
+
 function MemoryMode() {
   return (
     <div className="memoryBox">
@@ -370,14 +443,35 @@ function MemoryMode() {
   );
 }
 
-function LobbyActions({ state, isHost }) {
+function LobbyActions({ state, isHost, isSpectator, me }) {
+  const activePlayers = state.players.filter(isOccupiedPlayer);
+  const readyCount = activePlayers.filter(p => p.ready && p.connected).length;
+  const allReady = activePlayers.length === 4 && activePlayers.every(p => p.ready && p.connected);
+  const myReady = Boolean(me?.ready);
+
   return (
-    <div className="centerBox">
-      <p>{state.players.length}/4 active players joined.</p>
-      <ActionButton disabled={!isHost || state.players.length !== 4} onClick={() => socket.emit('startRound', { code: state.code })}>
-        Start Round
-      </ActionButton>
-      {!isHost && <p className="muted">Waiting for the host to start.</p>}
+    <div className="centerBox lobbyReadyBox">
+      <h3>Ready Up</h3>
+      <p>{activePlayers.length}/4 active players joined · {readyCount}/4 ready.</p>
+      <div className="readyGrid">
+        {state.players.map(p => (
+          <div key={p.seat} className={`readyChip ${p.ready ? 'ready' : ''} ${p.empty ? 'open' : ''}`}>
+            {p.empty ? <Users size={15}/> : p.ready ? <CheckCircle size={15}/> : <Clock size={15}/>} {p.empty ? `Seat ${p.seat + 1} open` : p.name}
+          </div>
+        ))}
+      </div>
+      {!isSpectator && me && (
+        <button className={`readyButton ${myReady ? 'ready' : ''}`} onClick={() => socket.emit('toggleReady', { code: state.code })}>
+          {myReady ? <><CheckCircle size={16}/> Ready</> : <><Clock size={16}/> Ready Up</>}
+        </button>
+      )}
+      {isHost && (
+        <ActionButton disabled={!allReady} onClick={() => socket.emit('startRound', { code: state.code })}>
+          Start Game
+        </ActionButton>
+      )}
+      {!isHost && <p className="muted">Waiting for the host to start once everyone is ready.</p>}
+      {isHost && !allReady && <p className="muted">All 4 active players must join seats and ready up first.</p>}
     </div>
   );
 }
@@ -452,46 +546,57 @@ function TrumpPicker({ state, enabled }) {
 }
 
 function Board({ state }) {
+  const positions = getSeatPositions();
+  const positionBySeat = Object.fromEntries(positions.map(({ seat, pos }) => [seat, pos]));
+  const playsByPos = Object.fromEntries((state.trick || []).map(play => [positionBySeat[play.player], play]));
+  const hasCards = (state.trick || []).length > 0;
+
   return (
-    <div className="board">
-      <h3>Current Trick</h3>
-      <div className="playedCards">
-        {state.trick.length === 0 && <p className="muted">No cards on the table yet.</p>}
-        {state.trick.map(play => (
-          <div key={`${play.player}-${play.card.id}`} className="played">
-            <span>{state.players[play.player]?.name}</span>
-            <Card card={play.card} small />
-          </div>
-        ))}
+    <div className="board tableOnlyBoard">
+      <div className="trickTable" aria-label="Current trick table">
+        {!hasCards && <p className="muted emptyTrick">No cards on the table yet.</p>}
+        {['top', 'left', 'right', 'bottom'].map(pos => {
+          const play = playsByPos[pos];
+          return (
+            <div key={pos} className={`trickSlot trick-${pos} ${play ? 'hasCard' : ''}`}>
+              {play ? (
+                <>
+                  <span>{state.players[play.player]?.name}</span>
+                  <Card card={play.card} table />
+                </>
+              ) : <div className="slotGhost" />}
+            </div>
+          );
+        })}
       </div>
     </div>
   );
 }
 
-function Card({ card, meta = { playable: true }, onClick, small = false }) {
+function Card({ card, meta = { playable: true }, onClick, small = false, table = false }) {
   const red = card.suit === 'hearts' || card.suit === 'diamonds' || card.type === 'redJoker';
   const joker = card.type !== 'normal';
-  const disabled = small ? true : !meta.playable;
+  const disabled = small || table ? true : !meta.playable;
   const title = meta.reason || card.label || '';
 
   return (
     <button
-      className={`playingCard ${red ? 'red' : ''} ${joker ? 'joker' : ''} ${small ? 'small' : ''} ${meta.playable ? 'playable' : 'notPlayable'} ${meta.risky ? 'risky' : ''}`}
+      className={`playingCard ${red ? 'red' : ''} ${joker ? 'joker' : ''} ${small ? 'small' : ''} ${table ? 'tableCard' : ''} ${meta.playable || table ? 'playable' : 'notPlayable'} ${meta.risky ? 'risky' : ''}`}
       disabled={disabled}
       title={title}
       onClick={onClick}
     >
       {joker ? (
         <>
-          <span className="jokerIcon">🃏</span>
-          <b>{card.type === 'redJoker' ? 'Red' : 'Black'}</b>
-          <small>Joker</small>
+          <span className="jokerCorner top">{card.type === 'redJoker' ? 'RJ' : 'BJ'}</span>
+          <span className="jokerIcon" aria-hidden="true">🃏</span>
+          <span className="jokerCorner bottom">{card.type === 'redJoker' ? 'RJ' : 'BJ'}</span>
         </>
       ) : (
         <>
-          <b>{card.rank}</b>
-          <span>{suitSymbols[card.suit]}</span>
-          <small>{suitNames[card.suit]}</small>
+          <span className="cardCorner top"><b>{card.rank}</b><em aria-hidden="true">{suitSymbols[card.suit]}</em></span>
+          <span className="cardSuit" aria-hidden="true">{suitSymbols[card.suit]}</span>
+          <span className="cardCorner bottom"><b>{card.rank}</b><em aria-hidden="true">{suitSymbols[card.suit]}</em></span>
         </>
       )}
     </button>
@@ -500,7 +605,7 @@ function Card({ card, meta = { playable: true }, onClick, small = false }) {
 
 function GameOver({ state, isHost }) {
   const winnerLabel = state.gameWinnerTeam !== null && state.gameWinnerTeam !== undefined
-    ? `Team ${state.gameWinnerTeam + 1} Wins!`
+    ? `${teamName(state.gameWinnerTeam)} Wins!`
     : 'Game Over';
 
   return (
@@ -510,7 +615,7 @@ function GameOver({ state, isHost }) {
         <h2>{winnerLabel}</h2>
         {state.endedByBound && <p className="boundBanner">Game ended by Bound</p>}
         <p>{state.message}</p>
-        <p className="finalScore">Final Score: <b>Team 1 {state.scores[0]}</b> · <b>Team 2 {state.scores[1]}</b></p>
+        <p className="finalScore">Final Score: <b>Team A: {state.scores[0]}</b> · <b>Team B: {state.scores[1]}</b></p>
         {isHost ? (
           <ActionButton onClick={() => socket.emit('startNewGame', { code: state.code })}>
             <RotateCcw size={16}/> Start New Game
@@ -554,16 +659,9 @@ function RulesModal({ onClose }) {
       <div className="rulesModal cardPanel" onClick={e => e.stopPropagation()}>
         <div className="modalHeader">
           <h2><HelpCircle size={20}/> Bound Rules</h2>
-          <button className="mini" onClick={onClose}>Close</button>
+          <button className="mini closeButton" onClick={onClose} aria-label="Close rules"><X size={18}/></button>
         </div>
-        <div className="rulesGrid">
-          <RuleBlock title="Bidding" text="Minimum bid is 6. A bid of 5 only appears for the final player when the previous three players skipped. Bound replaces a 9-trick bid." />
-          <RuleBlock title="Trump Suit" text="The auction winner chooses Trump Suit after bidding ends. Trump Suit beats all non-trump suits." />
-          <RuleBlock title="Tricks" text="Players must follow the lead suit if they have it. If they cannot, they may play Trump Suit, a filler card, or a Joker." />
-          <RuleBlock title="Jokers" text="Jokers cannot start a trick. Black Joker must be used within the first 3 tricks. Red Joker can only be used after Black Joker and cannot be held into the last trick." />
-          <RuleBlock title="Scoring" text="A successful bid scores exactly the bid. If the bid becomes mathematically impossible, the round ends immediately." />
-          <RuleBlock title="Bound" text="Bound means the bidding team must win all 9 tricks. Success wins the match. Failure loses the match." />
-        </div>
+        <HowToPlayContent />
       </div>
     </div>
   );
