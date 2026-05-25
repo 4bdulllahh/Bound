@@ -157,18 +157,16 @@ function Game({ state, error }) {
           </div>
         
 
-          <section className="handDock cardPanel cardsOnlyHand">
-            {isSpectator ? (
-              <div className="spectatorNotice"><Eye /> Spectators see table state, scores, tricks, and chat only.</div>
-            ) : (
+          {!isSpectator && sortedHand.length > 0 && (
+            <section className="handDock cardPanel cardsOnlyHand">
               <div className="cards">
                 {sortedHand.map(card => {
                   const meta = getCardPlayMeta(card, state, sortedHand, isMyTurn);
                   return <Card key={card.id} card={card} meta={meta} onClick={() => socket.emit('playCard', { code: state.code, cardId: card.id })} />;
                 })}
               </div>
-            )}
-          </section>
+            </section>
+          )}
         </section>
 
         <aside className="rightRail cardPanel">
